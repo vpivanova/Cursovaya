@@ -116,36 +116,78 @@ async function readerExcel(filePath: string): Promise<Teacher[]> {
 
 
 async function insertMongoDB(filePath: string): Promise<void> {
-  const teacherSchedules = await readerExcel(filePath);  // Считываем данные из Excel файла
+  const newTeacherSchedules = await readerExcel(filePath); 
 
-  // Параметры подключения к MongoDB
   const url = "mongodb://root:example@localhost:27017/";
-  const dbName = 'Cursi';
+  const dbName = 'Curs';
   const collectionNameT = 'Teachers';
 
-  // Создаем клиента MongoDB и подключаемся к базе данных
   const client = new MongoClient(url);
   try {
     await client.connect();
     console.log("Успешное подключение к MongoDB");
-
     const db = client.db(dbName);
-    const collection = db.collection(collectionNameT);
+    const collection = db.collection<Teacher>(collectionNameT);
 
-    // Вставляем расписание каждого преподавателя как отдельный документ
-    for (const teacherSchedule of teacherSchedules) {
-      await collection.updateMany(
-        { name: teacherSchedule.name },
-        { $set: teacherSchedule },
-        { upsert: true }
-      );
+    for (const newTeacherSchedule of newTeacherSchedules) {
+      const existingTeacherSchedule = await collection.findOne({ name: newTeacherSchedule.name });
+
+      if (existingTeacherSchedule) {
+        // Объединяем расписание для нечетной и четной недели
+        for (const weekType of ['oddWeek', 'evenWeek'] as const) {
+          for (const day of daysOfWeek) {
+            const existingDaySchedules = existingTeacherSchedule.schedule[weekType][day];
+            const newDaySchedules = newTeacherSchedule.schedule[weekType][day];
+  
+            // Обходим все записи для данного дня
+            newDaySchedules.forEach((newDaySchedule) => {
+              newDaySchedule.entries.forEach((newEntry) => {
+                // Ищем соответствующий Day и entry в существующем расписании
+                const existingDaySchedule = existingDaySchedules.find(ed => ed.entries.some(e => e.time === newEntry.time));
+                if (!existingDaySchedule) {
+                  // Если нет соответствующего Day, добавляем весь Day
+                  existingDaySchedules.push(newDaySchedule);
+                } else {
+                  // Если Day найден, ищем entry для обновления
+                  const existingEntryIndex = existingDaySchedule.entries.findIndex(e => e.time === newEntry.time);
+                  if (existingEntryIndex !== -1) {
+                    // Обновляем существующую запись, если новая информация более полная
+                    const existingEntry = existingDaySchedule.entries[existingEntryIndex];
+                    if (newEntry.group && (!existingEntry.group || newEntry.group.length > existingEntry.group.length)) {
+                      existingEntry.group = newEntry.group;
+                    }
+                    if (newEntry.classroom && (!existingEntry.classroom || newEntry.classroom.length > existingEntry.classroom.length)) {
+                      existingEntry.classroom = newEntry.classroom;
+                    }
+                    if (newEntry.subject.trim() !== '' && (!existingEntry.subject || newEntry.subject.length > existingEntry.subject.length)) {
+                      existingEntry.subject = newEntry.subject;
+                    }
+                    // Обновляем teacher только если поле не пустое
+                    if (newEntry.teacher.trim() !== '') {
+                      existingEntry.teacher = newEntry.teacher;
+                    }
+                  }
+                }
+              });
+            });
+          }
+        }
+
+        // Обновляем расписание преподавателя в базе данных
+        await collection.updateOne(
+          { name: newTeacherSchedule.name },
+          { $set: { schedule: existingTeacherSchedule.schedule } }
+        );
+      } else {
+        // Если расписания в базе данных нет, то используем новое расписание
+        await collection.insertOne(newTeacherSchedule);
+      }
     }
-
     console.log("Данные успешно вставлены в MongoDB");
   } catch (err) {
-    console.error("Произошла ошибка при вставке данных в MongoDB:", err);
+    console.error("Произошла ошибка при вставке или обновлении данных в MongoDB:", err);
   } finally {
-    await client.close(); // Закрываем соединение с базой данных
+    await client.close();
   }
 }
 
@@ -242,7 +284,6 @@ async function createExcelFile(schedule: ScheduleType, type: 'teacher' | 'group'
         oddWeekPara = oddWeekDay.flatMap(d => d.entries).find((entry: Para) => entry.time === time);
         evenWeekPara = evenWeekDay.flatMap(d => d.entries).find((entry: Para) => entry.time === time);
       } else {
-        // Используем правильный тип для группы
         oddWeekDay = (schedule as GroupSchedule).schedule.oddWeek[day];
         evenWeekDay = (schedule as GroupSchedule).schedule.evenWeek[day];
         oddWeekPara = oddWeekDay.flatMap(d => d.entries).find((entry: Para) => entry.time === time);
@@ -271,7 +312,6 @@ async function createExcelFile(schedule: ScheduleType, type: 'teacher' | 'group'
     };
   }
 
-  // Устанавливаем жирные границы для временных слотов без объединения ячейек
   for (let row = 3; row <= 22; row += 4) {
     for (let col = 1; col <= daysOfWeek.length + 1; col++) {
       // Устанавливаем верхнюю и правую границы для первой ячейки каждого временного блока
@@ -328,12 +368,10 @@ async function main() {
 
   const identifier = await question('Введите фамилию преподавателя или номер группы: ');
 
-  // Параметры подключения к MongoDB
   const url = "mongodb://root:example@localhost:27017/";
   const dbName = 'Curs';
   const collectionNameT = 'Teachers';
 
-  // Создаем клиента MongoDB и подключаемся к базе данных
   const client = new MongoClient(url);
 try {
   await client.connect();
